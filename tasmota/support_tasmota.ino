@@ -618,36 +618,76 @@ void ExecuteCommandPower(uint32_t device, uint32_t state, uint32_t source)
     SetPulseTimer((device -1) % MAX_PULSETIMERS, 0);
   }
 
-  static bool interlock_mutex = false;    // Interlock power command pending
   power_t mask = 1 << (device -1);        // Device to control
+  static bool pool_timer_mutex = false;   // Pool timer command pending
   if (state <= POWER_TOGGLE) {
     if ((TasmotaGlobal.blink_mask & mask)) {
       TasmotaGlobal.blink_mask &= (POWER_MASK ^ mask);  // Clear device mask
       MqttPublishPowerBlinkState(device);
     }
 
-    if (Settings->flag.interlock &&        // CMND_INTERLOCK - Enable/disable interlock
-        !interlock_mutex &&
-        ((POWER_ON == state) || ((POWER_TOGGLE == state) && !(TasmotaGlobal.power & mask)))
-       ) {
-      interlock_mutex = true;                           // Clear all but masked relay in interlock group if new set requested
-      bool perform_interlock_delay = false;
-      for (uint32_t i = 0; i < MAX_INTERLOCKS; i++) {
-        if (Settings->interlock[i] & mask) {             // Find interlock group
-          for (uint32_t j = 0; j < TasmotaGlobal.devices_present; j++) {
-            power_t imask = 1 << j;
-            if ((Settings->interlock[i] & imask) && (TasmotaGlobal.power & imask) && (mask != imask)) {
-              ExecuteCommandPower(j +1, POWER_OFF, SRC_IGNORE);
-              perform_interlock_delay = true;
-            }
+    // Pool timer transitions
+    if (!pool_timer_mutex) {
+      pool_timer_mutex = true;    // This is the first operation setting pool timer states
+
+      // Powering On or toggling from Off to On
+      if ((POWER_ON == state) || ((POWER_TOGGLE == state) && !(TasmotaGlobal.power & mask))) {
+        // Relay 1 ON
+        if (device == 1) {
+          // Relay 2 OFF
+          if (TasmotaGlobal.power & 2) {
+            ExecuteCommandPower(2, POWER_OFF, SRC_IGNORE);
           }
-          break;                                        // An interlocked relay is only present in one group so quit
+          // Relay 3 ON
+          if (!(TasmotaGlobal.power & 4)) {
+            ExecuteCommandPower(3, POWER_ON, SRC_IGNORE);
+          }
+        }
+        // Relay 2 ON
+        else if (device == 2) {
+          // Relay 1 OFF
+          if (TasmotaGlobal.power & 1) {
+            ExecuteCommandPower(1, POWER_OFF, SRC_IGNORE);
+          }
+          // Relay 3 ON
+          if (!(TasmotaGlobal.power & 4)) {
+            ExecuteCommandPower(3, POWER_ON, SRC_IGNORE);
+          }
+        }
+        // Relay 3 ON
+        else if (device == 3) {
+          // Cancel it, invalid
+          pool_timer_mutex = false;   // Pool timer operations completed
+          return;
         }
       }
-      if (perform_interlock_delay) {
-        delay(50);                                // Add some delay to make sure never have more than one relay on
+      // Powering Off or toggling from On to Off
+      else if ((POWER_OFF == state) || ((POWER_TOGGLE == state) && (TasmotaGlobal.power & mask))) {
+        // Relay 1 OFF or Relay 2 OFF
+        if (device == 1 || device == 2) {
+          // Relay 3 OFF
+          ExecuteCommandPower(3, POWER_OFF, SRC_IGNORE);
+        }
+        // Relay 3 OFF
+        else if (device == 3) {
+          // Relay 1 OFF
+          if (TasmotaGlobal.power & 1) {
+            ExecuteCommandPower(1, POWER_OFF, SRC_IGNORE);
+          }
+          // Relay 2 OFF
+          if (TasmotaGlobal.power & 2) {
+            ExecuteCommandPower(2, POWER_OFF, SRC_IGNORE);
+          }
+        }
       }
-      interlock_mutex = false;
+
+      pool_timer_mutex = false;   // Pool timer operations completed
+    }
+
+    if (Settings->flag.interlock &&        // CMND_INTERLOCK - Enable/disable interlock
+        ((POWER_ON == state) || ((POWER_TOGGLE == state) && !(TasmotaGlobal.power & mask)))
+       ) {
+      // Do not delete without fixing else if below
     }
 
 #ifdef USE_DEVICE_GROUPS
